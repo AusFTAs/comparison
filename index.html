@@ -9,7 +9,7 @@
   // helper functions
 
   //const api_prefix = 'http://v5.dev.ftaa.nicta.com.au/api/v2/json';
-  const api_prefix = 'https://ftaportal.dfat.gov.au/api/v3';
+  const api_prefix = 'https://api.ftaportal.dfat.gov.au/api/v3';
   const invoke = url =>
     new Promise((resolve, reject) =>
       d3.json(api_prefix + url, (error, data) =>
