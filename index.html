@@ -1,0 +1,415 @@
+<html>
+<head>
+  <script src="babel.min.js"></script>
+  <script src="d3.v4.min.js"></script>
+  <script src="d3-html.js"></script>
+  <script src="formula.js"></script>
+  <script type="text/babel" data-presets="es2015">
+  
+  // helper functions
+
+  //const api_prefix = 'http://v5.dev.ftaa.nicta.com.au/api/v2/json';
+  const api_prefix = 'https://ftaportal.dfat.gov.au/api/v3';
+  const invoke = url =>
+    new Promise((resolve, reject) =>
+      d3.json(api_prefix + url, (error, data) =>
+      {
+        if (error)
+        {
+          return reject(error);
+        }
+        if (data.deprecated)
+        {
+          console.error('DEPRECATION WARNING:', data.deprecated);
+        }
+        resolve(data.results);
+      }));
+  const formatSearchQuery = query =>
+    typeof query === 'string' &&
+    query.toLowerCase() // case insensitive; only search for lowercase characters
+    .replace(/[^a-zA-Z0-9 \.]/g, ' ') // these characters add no value to search
+    .replace(/\s+/g, '+') // remove all spaces with joiners
+    .replace(/^\+|\+$/g, ''); // remove any leading or trailing joiners
+
+
+  const stratifyHeadingDetails = function (heading, subheadings)
+  {
+    let subheadingsList = [];
+
+    for (let hscode in subheadings)
+    {
+      subheadings[hscode].hscode = hscode;
+      subheadingsList.push(subheadings[hscode]);
+    }
+
+    subheadingsList.push(subheadings[heading.hscode] = heading);
+
+    return d3.stratify()
+      .id(d => d.hscode)
+      .parentId(d =>
+      {
+        let id = d.hscode;
+        while (id.length > 0)
+        {
+          id = id.substr(0, id.length - 1);
+          if (subheadings[id] !== undefined)
+          {
+            return id;
+          }
+        }
+        return null;
+      })
+      (subheadingsList)
+      .sort((a, b) => a.id > b.id ? 1 : a.id === b.id ? 0 : -1);
+  };
+
+  const uglifyHSCode = function (code, showLabel, hasTariff)
+  {
+    let hscode = code.replace(/[^0-9]/g, '');
+    switch (hscode.length)
+    {
+    case 0:
+      return (showLabel ? 'Section ' : '') + code;
+    case 1:
+    case 2:
+      return (showLabel ? 'Chapter ' : '') + hscode;
+    case 3:
+    case 4:
+      return (showLabel ? 'Heading ' : '') + hscode;
+    case 5:
+    case 6:
+      return (showLabel ? 'Subheading ' : '') + hscode.substr(0, 4) + '.' + hscode.substr(4);
+    default:
+      if (hasTariff)
+      {
+        return (showLabel ? 'Item ' : '') + hscode.substr(0, 4) + '.' + hscode.substr(4, 2) + '.' + hscode.substr(6);
+      }
+      else
+      {
+        return (showLabel ? 'Subheading ' : '') + hscode.substr(0, 4) + '.' + hscode.substr(4, 2) + hscode.substr(6);
+      }
+    }
+  };
+
+  </script>
+  <style>
+  body
+  {
+    font-family: Monospace;
+    background: linear-gradient(#ffffff, #eeeeee);
+  }
+  p {
+    padding: 1em 1em 0em 1em;
+  }
+  
+  th, td {
+    align: left;
+    vertical-align: top;
+    padding: 0.5em 0.5em 0.5em 0.5em;
+    white-space: pre;
+  }
+  
+  .details tr:nth-child(even) {
+    background: #eeeeee;
+  }
+  
+  .details tr:nth-child(odd) {
+    background: #ffffff;
+  }
+  
+  .details tr:hover {
+    background: #000000;
+    color: #ffffff;
+  }
+  
+  </style>
+  
+</head>
+<body>
+  
+  <script type="text/babel" data-presets="es2015">
+    Promise.all([invoke(`/products/hierarchy.json`), invoke(`/agreements.json`)]).then(data =>
+    {
+      const hierarchy = data[0];
+      const agreements = data[1];
+      
+      // find which agreements apply to which markets
+      let agreementsByCountry = {};
+      
+      for (let agreementAcronym in agreements)
+      {
+        let agreement = agreements[agreementAcronym];
+        for (let countryAcronym in agreement.countries)
+        {
+          if (countryAcronym !== 'AUS')
+          {
+            agreementsByCountry[countryAcronym] = agreementsByCountry[countryAcronym] || [];
+            agreementsByCountry[countryAcronym].push(agreementAcronym);
+          }
+        }
+      }
+      
+      // draw search bar
+      let searchBar = d3.select('body').p();
+      
+      searchBar.span('1. Select Market: ');
+      
+      let portSelection = searchBar.append('select').on('input', search);
+      
+      Object.keys(agreementsByCountry).sort().forEach(country =>
+      {
+        if (agreementsByCountry[country].length > 1)
+        {
+          let countryFullName = agreements[agreementsByCountry[country][0]].countries[country].countryFullName;
+          portSelection.option(`Export To ${countryFullName}`).property('value', `${country}-export`);
+          portSelection.option(`Import From ${countryFullName}`).property('value', `${country}-import`);
+        }
+      });
+      
+      portSelection.property('value', localStorage.market || 'BRN-export');
+      
+      searchBar.br();
+      searchBar.span('2. Enter Keywords: ');
+      
+      let searchInput = searchBar.input().attr('type', 'search').on('input', search).attr('list', 'search-datalist'); searchInput.property('value', localStorage.query || '');
+      let searchInputDatalist = searchBar.datalist().property('id', 'search-datalist');
+      
+      searchBar.span(' or ');
+      
+      searchBar.button('Show All').on('click', showAll);
+      
+      searchBar.br();
+      
+      let hideMatchingDetails = searchBar.input().attr('type', 'checkbox').attr('id', 'hide-matching-details').property('checked', localStorage.hideMatchingDetails === "true");
+      searchBar.label('Hide details of matching items').attr('for', 'hide-matching-details');
+      hideMatchingDetails.on('change', () => search(localStorage.hideMatchingDetails = hideMatchingDetails.property('checked')))
+      
+      let resultsSummary = d3.select('body').p().b();
+      
+      let searchResults = d3.select('body').append('table').attr('border', '1px').attr('cellspacing', '0px');
+      
+      function search()
+      {
+        let countryPort = localStorage.market = portSelection.property('value');
+        let agreementList = agreementsByCountry[countryPort.split('-')[0]];
+        let country = countryPort.match(/export/)? countryPort.split('-')[0] : 'AUS';
+        invoke(`/products/search.json?query=${formatSearchQuery(localStorage.query = searchInput.property('value'))}`).then(results =>
+        {
+          renderResults(country, agreementList, results.products);
+        });
+      }
+      
+      function showAll()
+      {
+        let countryPort = portSelection.property('value');
+        let agreementList = agreementsByCountry[countryPort.split('-')[0]];
+        let country = countryPort.match(/export/)? countryPort.split('-')[0] : 'AUS';
+        renderResults(country, agreementList, Object.keys(hierarchy).filter(hs => hierarchy[hs].type === 'heading').sort().map(hs =>
+        {
+          return {
+            hscode: hs
+          };
+        }));
+      }
+      
+      function renderResults(country, agreementList, results)
+      {
+        let matches = 0;
+        let differences = 0;
+        
+        function renderResult(result)
+        {
+          let element = document.createElement('tr');
+          let headingOutput = d3.select(element);
+          
+          //output.th(result.hscode);
+          
+          let data = hierarchy[result.hscode];
+          
+          headingOutput = headingOutput.td();
+          headingOutput.b(result.hscode);
+          headingOutput.span(' - ' + indentManualWrap(0, data.description, 80));
+          
+          let detailedOutput = headingOutput.table().attr('border', '1px').attr('cellspacing', '0px');
+          
+          let heads = detailedOutput.tr();
+          let conts = detailedOutput.tr();
+          
+          let segments = {};
+          
+          data.countryAgreements
+            .filter(countryAgreement => agreementList.indexOf(countryAgreement.agreement) !== -1 && countryAgreement.country === country)
+            .forEach(countryAgreement =>
+          {
+            let head = heads.th(Object.keys(countryAgreement).filter(field => field !== 'country').map(field => countryAgreement[field] === true? field : countryAgreement[field]).join('<br />'));
+            let cont = conts.td();
+            
+            // get more detailed data
+            let promise = invoke(`/products/tariffs/${countryAgreement.country}/${countryAgreement.agreement}/${result.hscode}.json`);
+            segments[countryAgreement.agreement] = promise;
+            promise.then(subheadingData =>
+            {
+              function showResultChild(children, container)
+              {
+                children.forEach(child =>
+                {
+                  let output = container.tr();
+                  
+                  let space = (new Array(child.depth * 4 - 4)).join('&nbsp;');
+                  
+                  output.td(child.data.hscode);
+                  
+                  output.th(child.data.tariffs && uglifyHSCode(child.data.hscode, false, true) || '');
+                  
+                  output.td(indentManualWrap(child.depth - 1, child.data.description, 30));
+                  
+                  output.td(summariseProductTariff(child.data, agreements[countryAgreement.agreement].countries[country].tariffs.dates));
+                  
+                  if (child.children && child.children.length > 0)
+                  {
+                    showResultChild(child.children, container);
+                  }
+                });
+              }
+              // save data for later
+              segments[countryAgreement.agreement] = subheadingData;
+              // show data
+              data.hscode = result.hscode;
+              let subLayers = stratifyHeadingDetails(data, subheadingData);
+              showResultChild(subLayers.children, cont.table().classed('details', true));
+            });
+          });
+          
+          agreementList.length > 1 && Promise.all(Object.keys(segments).map(x => segments[x])).then(() =>
+          {
+            let match = Object.keys(segments).length > 1;
+            let matchOutput = false;
+            
+            for (let segment in segments)
+            {
+              let data = segments[segment];
+              data = Object.keys(data).sort().map(x =>
+              {
+                let xx = data[x];
+                if (xx.tariffs)
+                {
+                  return x.replace(/[^0-9]/g, '') + xx.description;
+                }
+                else
+                {
+                  return xx.description;
+                }
+              }).map(x => x.toLowerCase().replace(/\s+/g, '')).join('\n');
+              
+              
+              if (!matchOutput)
+              {
+                matchOutput = data;
+              }
+              else if (matchOutput !== data)
+              {
+                match = false;
+                break;
+              }
+            }
+            
+            if (match)
+            {
+              matches++;
+              if (localStorage.hideMatchingDetails === "true")
+              {
+                detailedOutput.remove();
+              }
+            }
+            else
+            {
+              differences++;
+            }
+            
+            headingOutput.style('background', match? '#e7ffe7': '#ffe7e7');
+            
+            resultsSummary.text(`${portSelection.node().options[portSelection.node().selectedIndex].text}; ${matches + differences} results/headings shown;  ${matches} (${Math.round(matches / (matches + differences) * 100)}%) headings could be matched and ${differences} (${Math.round(differences / (matches + differences) * 100)}%) could not`);
+            
+          });
+
+          return element;
+        }
+        searchResults.html('').selectAll().data(results).enter().append(renderResult);
+      }
+      
+      function indentManualWrap(level, text, width = 80)
+      {
+        let output = '';
+        while(text.length > 0)
+        {
+          let divide = text.lastIndexOf(' ', width);
+          if (divide <= 0 || text.length < width)
+          {
+            divide = width;
+          }
+          output += (new Array(level * 4)).join('&nbsp;') + text.substr(0, divide) + '\n';
+          text = text.substr(divide);
+        }
+        return output.replace(/\s$/, '');
+      }
+      
+      function summariseProductTariff(product, dates)
+      {
+        if (!product.tariffs)
+        {
+          return '';
+        }
+        product = product.tariffs;
+        // find current date
+        let index = -1;
+        let now = (new Date())
+          .toISOString()
+          .substr(0, 10);
+        while (index + 1 < dates.length)
+        {
+          if (dates[index + 1] > now)
+          {
+            break;
+          }
+          index++;
+        }
+        
+        // produce summary
+        let summary = [];
+
+        let free = true;
+        product.default.rates.slice(index)
+          .forEach(rate =>
+          {
+            if (!rate.match(/^[0\.]+ u '[^']+'$/))
+            {
+              free = false;
+            }
+          });
+        if (free)
+        {
+          summary.push('free');
+        }
+        else if (product.default.rates[index].match(/^[0-9\.]+ u '[^']+'$/) || product.default.rates[index].match(/^error friendly '[^']+'$/))
+        {
+          summary.push(TariffFormula.parse(product.default.rates[index]).friendly);
+        }
+        else
+        {
+          summary.push('complex')
+        }
+        product.seasonal && summary.push('seasonal');
+        product.quota && summary.push('quota');
+        product.safeguard && summary.push('safeguard');
+        
+        return summary.map(x => `<b>${x}</b>`).join(', ');
+        
+      }
+      
+      localStorage.query && localStorage.query.length && search();
+      
+    });
+  </script>
+  
+</body>
+</html>
